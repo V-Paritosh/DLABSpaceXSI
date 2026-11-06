@@ -1,9 +1,6 @@
-import { Router, type Request, type Response, type RequestHandler } from "express";
-import { isScenarioId } from "../config/scenarios";
-import { state } from "../state/store";
-import { HttpError, requestInvestigation } from "../services/investigationService";
-import { getHistory, getMissionView, getTelemetryView, setScenario } from "../services/telemetryService";
-import { activeModel, aiConfigured } from "../services/grokService";
+import { Router, type Request, type RequestHandler, type Response } from "express";
+import { handleMissionApi } from "../http/aiHandler";
+import { HttpError } from "../services/investigationService";
 
 export const apiRouter = Router();
 
@@ -13,72 +10,31 @@ function asyncRoute(handler: (req: Request, res: Response) => Promise<void>): Re
   };
 }
 
-apiRouter.get("/health", (_req, res) => {
-  res.json({
-    ok: true,
-    aiConfigured: aiConfigured(),
-    model: activeModel(),
-  });
-});
+function envSource(): { get(name: string): string | undefined } {
+  return {
+    get: (name) => process.env[name],
+  };
+}
 
-apiRouter.get("/mission", (_req, res) => {
-  res.json(getMissionView());
-});
-
-apiRouter.get("/telemetry", (_req, res) => {
-  const telemetry = getTelemetryView();
-  if (!telemetry) {
-    res.status(503).json({ error: "Telemetry is not available" });
-    return;
-  }
-  res.json(telemetry);
-});
-
-apiRouter.get("/telemetry/history", (req, res) => {
-  const limit = typeof req.query.limit === "string" ? Number(req.query.limit) : 60;
-  res.json(getHistory(limit));
-});
-
-apiRouter.post("/scenarios/:scenarioId", (req, res) => {
-  const scenarioId = req.params.scenarioId;
-  if (!isScenarioId(scenarioId)) {
-    res.status(400).json({
-      error: "Unknown scenario. Use normal, engine-overheating, or fuel-pressure-drop.",
-    });
-    return;
-  }
-  setScenario(scenarioId);
-  res.json({
-    scenario: scenarioId,
-    mission: getMissionView(),
-    telemetry: getTelemetryView(),
-  });
-});
-
-apiRouter.get("/anomalies", (_req, res) => {
-  res.json(state.anomalies);
-});
-
-apiRouter.get("/anomalies/:id", (req, res) => {
-  const anomaly = state.anomalies.find((item) => item.id === req.params.id);
-  if (!anomaly) {
-    res.status(404).json({ error: "Anomaly not found" });
-    return;
-  }
-  res.json(anomaly);
-});
-
-apiRouter.post(
-  "/anomalies/:id/investigate",
+apiRouter.use(
   asyncRoute(async (req, res) => {
-    const investigation = await requestInvestigation(req.params.id, "manual");
-    res.json(investigation);
+    const host = req.get("host") ?? "localhost";
+    const url = `${req.protocol}://${host}${req.originalUrl}`;
+    const init: RequestInit = { method: req.method };
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      const body = typeof req.body === "string" ? req.body : "";
+      init.body = body;
+      init.headers = { "content-type": "application/json" };
+    }
+    const response = await handleMissionApi(new Request(url, init), envSource());
+    const text = await response.text();
+    res.status(response.status);
+    const contentType = response.headers.get("content-type");
+    if (contentType) res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "no-store");
+    res.send(text);
   }),
 );
-
-apiRouter.get("/investigations", (_req, res) => {
-  res.json(state.investigations);
-});
 
 export function handleApiError(error: unknown, res: Response): boolean {
   if (error instanceof HttpError) {

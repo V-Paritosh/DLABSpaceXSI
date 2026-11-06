@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import { channelByKey, evaluateChannel } from "../config/channels";
 import { createApp } from "../app";
-import { extractJsonObject, setRemoteAiEnabled, validateInvestigationPayload } from "../services/grokService";
+import { handleMissionApi } from "../http/aiHandler";
+import { extractJsonObject, requestGrokInvestigation, setRemoteAiEnabled, validateInvestigationPayload } from "../services/grokService";
 import { requestInvestigation, resetInvestigationLocks } from "../services/investigationService";
 import {
   advanceSimulation,
@@ -192,7 +193,7 @@ async function testAutoInvestigationOnCritical(): Promise<void> {
   assert.equal(state.anomalies[0].status, "INVESTIGATED");
 }
 
-async function testHttp(): Promise<void> {
+async function testAiHttp(): Promise<void> {
   fresh();
   setRemoteAiEnabled(false);
   const server = createApp().listen(0);
@@ -203,54 +204,71 @@ async function testHttp(): Promise<void> {
   const base = `http://127.0.0.1:${(address as AddressInfo).port}`;
 
   try {
-    const bad = await fetch(`${base}/api/scenarios/explode`, { method: "POST" });
-    assert.equal(bad.status, 400);
+    const health = await fetch(`${base}/api/health`);
+    assert.equal(health.status, 200);
+    assert.equal(health.headers.get("cache-control"), "no-store");
+    const healthBody = (await health.json()) as { ok: boolean; aiConfigured: boolean; model: string };
+    assert.equal(healthBody.ok, true);
+    assert.equal(healthBody.aiConfigured, false);
+    assert.ok(healthBody.model.length > 0);
 
-    const normal = await fetch(`${base}/api/scenarios/normal`, { method: "POST" });
-    assert.equal(normal.status, 200);
-    const normalBody = (await normal.json()) as { mission: { status: string } };
-    assert.equal(normalBody.mission.status, "NOMINAL");
-
-    const telemetry = await fetch(`${base}/api/telemetry`);
-    assert.equal(telemetry.status, 200);
-    const telemetryBody = (await telemetry.json()) as { channels: unknown[] };
-    assert.equal(telemetryBody.channels.length, 5);
-
-    const history = await fetch(`${base}/api/telemetry/history?limit=30`);
-    const historyBody = (await history.json()) as { points: unknown[] };
-    assert.ok(historyBody.points.length >= 1);
-
-    setScenario("engine-overheating");
-    stepUntil(
-      () => state.anomalies.some((anomaly) => anomaly.severity === "CRITICAL"),
-    );
-    const listed = (await (await fetch(`${base}/api/anomalies`)).json()) as Array<{ id: string }>;
-    assert.equal(listed.length, 1);
-
-    const missing = await fetch(`${base}/api/anomalies/ANM-9999`);
+    const missing = await fetch(`${base}/api/telemetry`);
     assert.equal(missing.status, 404);
 
-    const investigation = await fetch(`${base}/api/anomalies/${listed[0].id}/investigate`, {
+    const bad = await fetch(`${base}/api/investigate`, {
       method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "not-json",
+    });
+    assert.equal(bad.status, 400);
+
+    const investigation = await fetch(`${base}/api/investigate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mission: { id: "orbital-01" }, note: "simulated" }),
     });
     assert.equal(investigation.status, 200);
-    const report = (await investigation.json()) as { source: string; evidence: string[] };
-    assert.equal(report.source, "fallback");
-    assert.ok(report.evidence.length > 0);
-
-    const reports = (await (await fetch(`${base}/api/investigations`)).json()) as unknown[];
-    assert.equal(reports.length, 1);
-
-    const mission = (await (await fetch(`${base}/api/mission`)).json()) as {
-      name: string;
-      status: string;
-    };
-    assert.equal(mission.name, "ORBITAL-01");
-    assert.equal(mission.status, "CRITICAL");
+    const report = (await investigation.json()) as { ok: boolean; reason?: string };
+    assert.equal(report.ok, false);
+    assert.match(report.reason ?? "", /Remote AI disabled/);
   } finally {
     await new Promise<void>((resolve, reject) => {
       server.close((error) => (error ? reject(error) : resolve()));
     });
+  }
+}
+
+async function testHandlerReadsCallerEnv(): Promise<void> {
+  setRemoteAiEnabled(true);
+  const secret = "xai-this-must-not-leak";
+  try {
+    const health = await handleMissionApi(new Request("https://mission.example/api/health"), {
+      get: (name) => (name === "XAI_API_KEY" ? secret : name === "XAI_MODEL" ? "grok-demo" : undefined),
+    });
+    const healthText = await health.text();
+    const healthBody = JSON.parse(healthText) as { aiConfigured: boolean; model: string };
+    assert.equal(healthBody.aiConfigured, true);
+    assert.equal(healthBody.model, "grok-demo");
+    assert.equal(healthText.includes(secret), false);
+    assert.equal(healthText.includes("XAI_API_KEY"), false);
+
+    const rewritten = await handleMissionApi(
+      new Request("https://mission.example/.netlify/functions/api/health"),
+      { get: () => undefined },
+    );
+    const rewrittenBody = (await rewritten.json()) as { ok: boolean; aiConfigured: boolean };
+    assert.equal(rewritten.status, 200);
+    assert.equal(rewrittenBody.ok, true);
+    assert.equal(rewrittenBody.aiConfigured, false);
+
+    const missingKey = await requestGrokInvestigation({ anomaly: "test" }, { apiKey: "", model: "grok-4.7" });
+    assert.equal(missingKey.ok, false);
+    if (!missingKey.ok) {
+      assert.match(missingKey.reason, /XAI_API_KEY is not set/);
+      assert.match(missingKey.reason, /onboard threshold rules/);
+    }
+  } finally {
+    setRemoteAiEnabled(false);
   }
 }
 
@@ -263,7 +281,8 @@ async function main(): Promise<void> {
   testFuelScenario();
   await testFallbackInvestigation();
   await testAutoInvestigationOnCritical();
-  await testHttp();
+  await testAiHttp();
+  await testHandlerReadsCallerEnv();
   stopSimulation();
   console.log("Mission Control verification passed");
 }
