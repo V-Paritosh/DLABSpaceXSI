@@ -1,0 +1,18 @@
+{
+  "name": "mission-control-ai",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Aerospace telemetry monitoring and AI anomaly investigation dashboard.",
+  "scripts": {
+    "setup": "npm install --prefix server && npm install --prefix client",
+    "postinstall": "npm install --prefix server && npm install --prefix client",
+    "dev": "concurrently -n server,client -c cyan,magenta \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "dev:server": "npm run dev --prefix server",
+    "dev:client": "npm run dev --prefix client",
+    "typecheck": "npm run typecheck --prefix server && npm run typecheck --prefix client",
+    "verify": "npm run verify --prefix server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
