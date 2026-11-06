@@ -2,7 +2,11 @@ import { MONITORED_CHANNELS, evaluateChannel, thresholdFor } from "../config/cha
 import { nextAnomalyId, state } from "../state/store";
 import type { Anomaly, MissionStatus, Telemetry } from "../types";
 import { formatReading } from "../utils/number";
-import { noteEscalation, requestInvestigation } from "./investigationService";
+
+export interface AnomalySignal {
+  type: "critical-opened" | "escalated";
+  anomalyId: string;
+}
 
 export function calculateMissionStatus(anomalies: Anomaly[]): MissionStatus {
   const open = anomalies.filter((anomaly) => anomaly.status !== "RESOLVED");
@@ -24,7 +28,8 @@ function describe(
   return `${name}: ${formatReading(value, decimals)} ${unit} is ${relation} the ${severity.toLowerCase()} threshold of ${threshold} ${unit}.`;
 }
 
-export function evaluateAnomalies(sample: Telemetry): void {
+export function evaluateAnomalies(sample: Telemetry): AnomalySignal[] {
+  const signals: AnomalySignal[] = [];
   for (const channel of MONITORED_CHANNELS) {
     const value = sample[channel.key];
     const health = evaluateChannel(channel, value);
@@ -72,10 +77,8 @@ export function evaluateAnomalies(sample: Telemetry): void {
       if (state.anomalies.length > 100) {
         state.anomalies.length = 100;
       }
-      if (state.autoInvestigate && health === "CRITICAL") {
-        void requestInvestigation(anomaly.id, "auto").catch((error: unknown) => {
-          console.error("[investigate] automatic start failed", error);
-        });
+      if (health === "CRITICAL") {
+        signals.push({ type: "critical-opened", anomalyId: anomaly.id });
       }
       continue;
     }
@@ -87,10 +90,11 @@ export function evaluateAnomalies(sample: Telemetry): void {
     open.description = description;
     open.updatedAt = sample.timestamp;
 
-    if (escalated && state.autoInvestigate) {
-      noteEscalation(open.id);
+    if (escalated) {
+      signals.push({ type: "escalated", anomalyId: open.id });
     }
   }
 
   state.mission.status = calculateMissionStatus(state.anomalies);
+  return signals;
 }

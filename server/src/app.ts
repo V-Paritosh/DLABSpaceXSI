@@ -6,7 +6,7 @@ export function createApp() {
   const app = express();
   app.disable("x-powered-by");
   app.use(cors());
-  app.use(express.json({ limit: "32kb" }));
+  app.use(express.text({ type: "*/*", limit: "48kb" }));
   app.use("/api", (_req, res, next) => {
     res.set("Cache-Control", "no-store");
     next();

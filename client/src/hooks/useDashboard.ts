@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { investigateAnomaly, loadDashboard, setScenario } from "../services/api";
+import { readDashboard, runInvestigation, selectScenario, startMissionLoop, subscribe } from "../simulation/runtime";
+import { fetchAiStatus } from "../services/api";
 import type { Anomaly, DashboardData, Investigation, ScenarioId } from "../types";
 
 export type LinkState = "connecting" | "online" | "offline";
@@ -12,68 +13,63 @@ export function useDashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [link, setLink] = useState<LinkState>("connecting");
   const [pinnedId, setPinnedId] = useState<string | null>(null);
-  const [scenarioPending, setScenarioPending] = useState<ScenarioId | null>(null);
   const [scenarioError, setScenarioError] = useState<string | null>(null);
   const [investigateError, setInvestigateError] = useState<string | null>(null);
   const [pendingInvestigation, setPendingInvestigation] = useState(false);
-  const seq = useRef(0);
+  const aiRef = useRef({ aiConfigured: false, aiModel: "grok-4.7" });
 
-  const refresh = useCallback(async () => {
-    const id = ++seq.current;
-    try {
-      const next = await loadDashboard();
-      if (id !== seq.current) return;
-      setData(next);
-      setLink("online");
-      setScenarioPending((current) => (current && next.mission.scenario === current ? null : current));
-    } catch {
-      if (id !== seq.current) return;
-      setLink("offline");
-    }
+  const publish = useCallback(() => {
+    const next = readDashboard(aiRef.current);
+    setData(next);
+    setLink(next ? "online" : "connecting");
   }, []);
 
   useEffect(() => {
-    void refresh();
-    const timer = window.setInterval(() => {
-      void refresh();
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [refresh]);
+    const unsubscribe = subscribe(publish);
+    const stop = startMissionLoop();
+    publish();
+    return () => {
+      unsubscribe();
+      stop();
+    };
+  }, [publish]);
 
-  const selectScenario = useCallback(
-    async (next: ScenarioId) => {
-      setScenarioPending(next);
-      setPinnedId(null);
-      setScenarioError(null);
-      setInvestigateError(null);
-      try {
-        await setScenario(next);
-        await refresh();
-      } catch (error) {
-        setScenarioPending(null);
-        setScenarioError(error instanceof Error ? error.message : "Scenario change failed");
-      }
-    },
-    [refresh],
-  );
+  useEffect(() => {
+    let cancelled = false;
+    const ping = () => {
+      void fetchAiStatus().then((status) => {
+        if (cancelled) return;
+        aiRef.current = status;
+        publish();
+      });
+    };
+    ping();
+    const timer = window.setInterval(ping, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [publish]);
 
-  const investigate = useCallback(
-    async (anomalyId: string) => {
-      setPendingInvestigation(true);
-      setInvestigateError(null);
-      setPinnedId(anomalyId);
-      try {
-        await investigateAnomaly(anomalyId);
-        await refresh();
-      } catch (error) {
-        setInvestigateError(error instanceof Error ? error.message : "Investigation failed");
-        await refresh();
-      } finally {
-        setPendingInvestigation(false);
-      }
-    },
-    [refresh],
-  );
+  const changeScenario = useCallback((next: ScenarioId) => {
+    setPinnedId(null);
+    setScenarioError(null);
+    setInvestigateError(null);
+    selectScenario(next);
+  }, []);
+
+  const investigate = useCallback(async (anomalyId: string) => {
+    setPendingInvestigation(true);
+    setInvestigateError(null);
+    setPinnedId(anomalyId);
+    try {
+      await runInvestigation(anomalyId, "manual");
+    } catch (error) {
+      setInvestigateError(error instanceof Error ? error.message : "Investigation failed");
+    } finally {
+      setPendingInvestigation(false);
+    }
+  }, []);
 
   const anomalies = data?.anomalies ?? [];
   const investigations = data?.investigations ?? [];
@@ -87,16 +83,14 @@ export function useDashboard() {
   }, [anomalies, pinnedId]);
 
   const investigation = selected ? latestInvestigation(investigations, selected.id) : null;
-  const revisionCount = selected
-    ? investigations.filter((item) => item.anomalyId === selected.id).length
-    : 0;
+  const revisionCount = selected ? investigations.filter((item) => item.anomalyId === selected.id).length : 0;
 
   return {
     data,
     link,
-    scenario: scenarioPending ?? data?.mission.scenario ?? "normal",
+    scenario: data?.mission.scenario ?? "normal",
     scenarioError,
-    selectScenario,
+    selectScenario: changeScenario,
     anomalies,
     openAnomalies: anomalies.filter((anomaly) => anomaly.status !== "RESOLVED"),
     selected,

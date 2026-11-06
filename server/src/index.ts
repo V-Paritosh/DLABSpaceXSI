@@ -3,7 +3,6 @@ import path from "path";
 import { fileURLToPath } from "node:url";
 import { createApp } from "./app";
 import { activeModel, aiConfigured } from "./services/grokService";
-import { startSimulation } from "./services/telemetryService";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const envFiles = [
@@ -18,9 +17,9 @@ for (const file of envFiles) {
 }
 
 const port = Number(process.env.PORT) || 3001;
-startSimulation();
 createApp().listen(port, () => {
   console.log(`Mission Control AI API listening on http://localhost:${port}`);
+  console.log("Simulation runs in the browser. This process serves /api/health and /api/investigate.");
   console.log(`Grok: ${aiConfigured() ? "configured" : "not configured — fallback rules active"}`);
   console.log(`Model: ${activeModel()}`);
 });

@@ -33,7 +33,7 @@ export function Dashboard() {
           <section className="grid grid-cols-2 gap-2 lg:grid-cols-3 xl:grid-cols-5">
             {channels.length === 0 ? (
               <p className="col-span-full border border-steel bg-panel px-3 py-6 text-[12px] tracking-[0.14em] text-haze">
-                AWAITING TELEMETRY FROM THE MISSION SERVER
+                AWAITING TELEMETRY
               </p>
             ) : (
               channels.map((channel) => <TelemetryCard key={channel.key} channel={channel} />)
